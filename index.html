@@ -11,43 +11,79 @@
   <link rel="apple-touch-icon" href="./icon-192.png">
 
   <!-- OneSignal SDK の読み込み -->
+  <!-- OneSignal SDK の読み込み -->
   <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
   <script>
-    // 現在のフォルダ階層（例: "/tssportal/"）を自動取得
+    // GitHub Pagesのフォルダ階層（例: "/tssportal/"）を自動取得
     const currentPath = window.location.pathname.replace(/\/[^\/]*$/, '/');
 
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async function(OneSignal) {
-      await OneSignal.init({
-        appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
-        // ★重要：GitHub Pagesのフォルダ階層から確実にWorkerを読み込む設定
-        serviceWorkerPath: currentPath.replace(/^\//, '') + "OneSignalSDKWorker.js",
-        serviceWorkerParam: { scope: currentPath },
-        notifyButton: {
-          enable: true
-        }
-      });
+      try {
+        await OneSignal.init({
+          appId: "961fa089-fa82-41eb-bc31-ここに残りのAPP_IDを入力",
+          // ★修正：先頭にスラッシュを含めた正確なパスを指定
+          serviceWorkerPath: currentPath + "OneSignalSDKWorker.js",
+          serviceWorkerParam: { scope: currentPath },
+          notifyButton: {
+            enable: true
+          }
+        });
 
-      // すでにログイン済みの社員IDが保存されていれば再紐付け
-      const savedEmpId = localStorage.getItem("tss_emp_id");
-      if (savedEmpId) {
-        await OneSignal.login(savedEmpId);
+        updateDebugStatus(OneSignal);
+
+        // すでにログイン済みの社員IDが保存されていれば紐付け
+        const savedEmpId = localStorage.getItem("tss_emp_id");
+        if (savedEmpId) {
+          await OneSignal.login(savedEmpId);
+        }
+
+        // 通知の登録状態が変わったら画面左上の表示を更新
+        OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
+          updateDebugStatus(OneSignal);
+          const empId = localStorage.getItem("tss_emp_id");
+          if (event.current.optedIn && empId) {
+            await OneSignal.login(empId);
+          }
+        });
+      } catch (err) {
+        showDebugBar("❌ OneSignalエラー: " + err.message, "#dc2626");
       }
-
-      // 通知許可を後からONにした瞬間にも社員IDを確実に紐付ける
-      OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
-        const empId = localStorage.getItem("tss_emp_id");
-        if (event.current.optedIn && empId) {
-          await OneSignal.login(empId);
-        }
-      });
     });
 
-    // ★GASからの合図（ログイン・ログアウト）を受け取る処理
+    // 画面左上に現在の登録状態を表示する診断関数
+    function updateDebugStatus(OneSignal) {
+      const isOptedIn = OneSignal.User.PushSubscription.optedIn;
+      const subId = OneSignal.User.PushSubscription.id;
+      if (isOptedIn && subId) {
+        showDebugBar("✅ 通知登録OK (ID: " + subId.substring(0, 6) + "...)", "#16a34a");
+      } else {
+        showDebugBar("⚠️ 通知未登録（右下のベルマークを押してください）", "#d97706");
+      }
+    }
+
+    function showDebugBar(text, bgColor) {
+      let bar = document.getElementById("os-debug-bar");
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.id = "os-debug-bar";
+        bar.style.cssText = "position:fixed; top:4px; left:4px; z-index:99999; color:#fff; font-size:11px; font-weight:bold; padding:4px 8px; border-radius:4px; cursor:pointer; box-shadow:0 2px 4px rgba(0,0,0,0.2);";
+        // タップすると直接ブラウザの通知許可ウィンドウを呼び出す
+        bar.onclick = function() {
+          OneSignalDeferred.push(async function(OneSignal) {
+            await OneSignal.Notifications.requestPermission();
+          });
+        };
+        document.body.appendChild(bar);
+      }
+      bar.style.backgroundColor = bgColor;
+      bar.innerText = text;
+    }
+
+    // GASからの合図（ログイン・ログアウト）を受け取る処理
     window.addEventListener("message", function(event) {
       if (!event.data) return;
 
-      // 1. ログイン成功時：社員IDを保存してOneSignalに紐付け
       if (event.data.type === "TSS_LOGIN" && event.data.userId) {
         const empId = String(event.data.userId).trim();
         localStorage.setItem("tss_emp_id", empId);
@@ -56,7 +92,6 @@
         });
       }
 
-      // 2. ログアウト時：GitHub Pages自身を再読み込みしてログイン画面へ戻す
       if (event.data.type === "TSS_LOGOUT") {
         window.location.reload();
       }
