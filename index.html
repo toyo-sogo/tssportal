@@ -4,67 +4,61 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>TSS社内ポータル</title>
-  <!-- PWA用の設定ファイル読み込み -->
   <link rel="manifest" href="./manifest.json">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="TSS社内ポータル">
+  <meta name="apple-mobile-web-app-title" content="TSSポータル">
   <link rel="apple-touch-icon" href="./icon-192.png">
 
   <!-- OneSignal SDK の読み込み -->
   <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
   <script>
+    // 現在のフォルダ階層（例: "/tssportal/"）を自動取得
+    const currentPath = window.location.pathname.replace(/\/[^\/]*$/, '/');
+
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async function(OneSignal) {
       await OneSignal.init({
         appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
-        // ▼ 右下のベルマークの日本語化
+        // ★重要：GitHub Pagesのフォルダ階層から確実にWorkerを読み込む設定
+        serviceWorkerPath: currentPath.replace(/^\//, '') + "OneSignalSDKWorker.js",
+        serviceWorkerParam: { scope: currentPath },
         notifyButton: {
-          enable: true,
-          text: {
-            'tip.state.unsubscribed': '通知を受け取る',
-            'tip.state.subscribed': '通知は有効です',
-            'tip.state.blocked': '通知がブロックされています',
-            'message.prenotify': 'タップして通知を受け取る',
-            'message.action.subscribed': '通知設定が完了しました！',
-            'message.action.resubscribed': '通知の受信を再開しました',
-            'message.action.unsubscribed': '通知をオフにしました',
-            'dialog.main.title': 'TSS社内ポータル通知設定',
-            'dialog.main.button.subscribe': '通知をオンにする',
-            'dialog.main.button.unsubscribe': '通知をオフにする',
-            'dialog.blocked.title': '通知のブロック解除',
-            'dialog.blocked.message': 'ブラウザの設定から通知を許可してください。'
-          }
-        },
-        // ▼ 通知確認ポップアップの日本語化
-        promptOptions: {
-          slidedown: {
-            prompts: [
-              {
-                type: "push",
-                autoPrompt: true, // ログイン前に勝手に出ないようにする
-                text: {
-                  actionMessage: "TSS社内ポータルからの新着お知らせを受け取りますか？",
-                  acceptButton: "許可する",
-                  cancelButton: "あとで"
-                }
-              }
-            ]
-          }
+          enable: true
+        }
+      });
+
+      // すでにログイン済みの社員IDが保存されていれば再紐付け
+      const savedEmpId = localStorage.getItem("tss_emp_id");
+      if (savedEmpId) {
+        await OneSignal.login(savedEmpId);
+      }
+
+      // 通知許可を後からONにした瞬間にも社員IDを確実に紐付ける
+      OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
+        const empId = localStorage.getItem("tss_emp_id");
+        if (event.current.optedIn && empId) {
+          await OneSignal.login(empId);
         }
       });
     });
 
-    // ★GASポータル側から「ログイン成功した社員ID」を受け取ってスマホと紐付ける処理
+    // ★GASからの合図（ログイン・ログアウト）を受け取る処理
     window.addEventListener("message", function(event) {
-      if (event.data && event.data.type === "TSS_LOGIN" && event.data.userId) {
+      if (!event.data) return;
+
+      // 1. ログイン成功時：社員IDを保存してOneSignalに紐付け
+      if (event.data.type === "TSS_LOGIN" && event.data.userId) {
         const empId = String(event.data.userId).trim();
+        localStorage.setItem("tss_emp_id", empId);
         OneSignalDeferred.push(async function(OneSignal) {
-          // 社員IDをOneSignalに登録
           await OneSignal.login(empId);
-          // ログイン成功後に日本語の確認画面を表示
-          await OneSignal.Slidedown.promptPush();
         });
+      }
+
+      // 2. ログアウト時：GitHub Pages自身を再読み込みしてログイン画面へ戻す
+      if (event.data.type === "TSS_LOGOUT") {
+        window.location.reload();
       }
     });
   </script>
