@@ -10,11 +10,10 @@
   <meta name="apple-mobile-web-app-title" content="TSSポータル">
   <link rel="apple-touch-icon" href="./icon-192.png">
 
-  <!-- OneSignal SDK の読み込み -->
+ 
   <!-- OneSignal SDK の読み込み -->
   <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
   <script>
-    // GitHub Pagesのフォルダ階層（例: "/tssportal/"）を自動取得
     const currentPath = window.location.pathname.replace(/\/[^\/]*$/, '/');
 
     window.OneSignalDeferred = window.OneSignalDeferred || [];
@@ -22,8 +21,8 @@
       try {
         await OneSignal.init({
           appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
-          // ★修正：先頭にスラッシュを含めた正確なパスを指定
-          serviceWorkerPath: currentPath + "OneSignalSDKWorker.js",
+          // OneSignal v16仕様：先頭のスラッシュを除いた相対パスを指定
+          serviceWorkerPath: currentPath.replace(/^\//, '') + "OneSignalSDKWorker.js",
           serviceWorkerParam: { scope: currentPath },
           notifyButton: {
             enable: true
@@ -32,13 +31,11 @@
 
         updateDebugStatus(OneSignal);
 
-        // すでにログイン済みの社員IDが保存されていれば紐付け
         const savedEmpId = localStorage.getItem("tss_emp_id");
         if (savedEmpId) {
           await OneSignal.login(savedEmpId);
         }
 
-        // 通知の登録状態が変わったら画面左上の表示を更新
         OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
           updateDebugStatus(OneSignal);
           const empId = localStorage.getItem("tss_emp_id");
@@ -47,28 +44,27 @@
           }
         });
       } catch (err) {
-        showDebugBar("❌ OneSignalエラー: " + err.message, "#dc2626");
+        showDebugBar("❌ OneSignalエラー: " + err.message, "#dc2626", false);
       }
     });
 
-    // 画面左上に現在の登録状態を表示する診断関数
     function updateDebugStatus(OneSignal) {
       const isOptedIn = OneSignal.User.PushSubscription.optedIn;
       const subId = OneSignal.User.PushSubscription.id;
       if (isOptedIn && subId) {
-        showDebugBar("✅ 通知登録OK (ID: " + subId.substring(0, 6) + "...)", "#16a34a");
+        // ★修正：登録OKの場合は3秒後に自動でバーを消す（画面に常駐させない）
+        showDebugBar("✅ 通知登録OK", "#16a34a", true);
       } else {
-        showDebugBar("⚠️ 通知未登録（右下のベルマークを押してください）", "#d97706");
+        showDebugBar("⚠️ ここをタップして通知をオンにする", "#d97706", false);
       }
     }
 
-    function showDebugBar(text, bgColor) {
+    function showDebugBar(text, bgColor, autoHide) {
       let bar = document.getElementById("os-debug-bar");
       if (!bar) {
         bar = document.createElement("div");
         bar.id = "os-debug-bar";
-        bar.style.cssText = "position:fixed; top:4px; left:4px; z-index:99999; color:#fff; font-size:11px; font-weight:bold; padding:4px 8px; border-radius:4px; cursor:pointer; box-shadow:0 2px 4px rgba(0,0,0,0.2);";
-        // タップすると直接ブラウザの通知許可ウィンドウを呼び出す
+        bar.style.cssText = "position:fixed; top:4px; left:4px; z-index:99999; color:#fff; font-size:11px; font-weight:bold; padding:4px 8px; border-radius:4px; cursor:pointer; box-shadow:0 2px 4px rgba(0,0,0,0.2); transition: opacity 0.5s;";
         bar.onclick = function() {
           OneSignalDeferred.push(async function(OneSignal) {
             await OneSignal.Notifications.requestPermission();
@@ -76,11 +72,19 @@
         };
         document.body.appendChild(bar);
       }
+      bar.style.opacity = "1";
+      bar.style.display = "block";
       bar.style.backgroundColor = bgColor;
       bar.innerText = text;
+
+      if (autoHide) {
+        setTimeout(() => {
+          bar.style.opacity = "0";
+          setTimeout(() => { bar.style.display = "none"; }, 500);
+        }, 3000);
+      }
     }
 
-    // GASからの合図（ログイン・ログアウト）を受け取る処理
     window.addEventListener("message", function(event) {
       if (!event.data) return;
 
