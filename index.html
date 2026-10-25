@@ -18,7 +18,40 @@
     OneSignalDeferred.push(async function(OneSignal) {
       await OneSignal.init({
         appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
-        notifyButton: { enable: true } // 画面右下に通知許可のベルマークを表示
+        // ▼ 右下のベルマークの日本語化
+        notifyButton: {
+          enable: true,
+          text: {
+            'tip.state.unsubscribed': '通知を受け取る',
+            'tip.state.subscribed': '通知は有効です',
+            'tip.state.blocked': '通知がブロックされています',
+            'message.prenotify': 'タップして通知を受け取る',
+            'message.action.subscribed': '通知設定が完了しました！',
+            'message.action.resubscribed': '通知の受信を再開しました',
+            'message.action.unsubscribed': '通知をオフにしました',
+            'dialog.main.title': 'TSS社内ポータル通知設定',
+            'dialog.main.button.subscribe': '通知をオンにする',
+            'dialog.main.button.unsubscribe': '通知をオフにする',
+            'dialog.blocked.title': '通知のブロック解除',
+            'dialog.blocked.message': 'ブラウザの設定から通知を許可してください。'
+          }
+        },
+        // ▼ 通知確認ポップアップの日本語化
+        promptOptions: {
+          slidedown: {
+            prompts: [
+              {
+                type: "push",
+                autoPrompt: false, // ログイン前に勝手に出ないようにする
+                text: {
+                  actionMessage: "TSS社内ポータルからの新着お知らせを受け取りますか？",
+                  acceptButton: "許可する",
+                  cancelButton: "あとで"
+                }
+              }
+            ]
+          }
+        }
       });
     });
 
@@ -27,9 +60,9 @@
       if (event.data && event.data.type === "TSS_LOGIN" && event.data.userId) {
         const empId = String(event.data.userId).trim();
         OneSignalDeferred.push(async function(OneSignal) {
-          // 社員IDをOneSignalの「External ID」として登録
+          // 社員IDをOneSignalに登録
           await OneSignal.login(empId);
-          // 通知許可ポップアップを表示
+          // ログイン成功後に日本語の確認画面を表示
           await OneSignal.Slidedown.promptPush();
         });
       }
