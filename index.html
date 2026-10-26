@@ -18,73 +18,34 @@
 
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async function(OneSignal) {
-      try {
-        await OneSignal.init({
-          appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
-          // OneSignal v16仕様：先頭のスラッシュを除いた相対パスを指定
-          serviceWorkerPath: currentPath.replace(/^\//, '') + "OneSignalSDKWorker.js",
-          serviceWorkerParam: { scope: currentPath },
-          notifyButton: {
-            enable: true
-          }
-        });
-
-        updateDebugStatus(OneSignal);
-
-        const savedEmpId = localStorage.getItem("tss_emp_id");
-        if (savedEmpId) {
-          await OneSignal.login(savedEmpId);
+      await OneSignal.init({
+        appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
+        serviceWorkerPath: currentPath.replace(/^\//, '') + "OneSignalSDKWorker.js",
+        serviceWorkerParam: { scope: currentPath },
+        notifyButton: {
+          // ★PCでも通知を使えるようにする場合は true のままにします。
+          // もし「スマホ・タブレットの時だけ右下のベルマークを出したい（PCでは完全に隠したい）」場合は、
+          // 下の行を enable: /iphone|ipad|ipod|android/i.test(navigator.userAgent) に書き換えてください。
+          enable: true
         }
+      });
 
-        OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
-          updateDebugStatus(OneSignal);
-          const empId = localStorage.getItem("tss_emp_id");
-          if (event.current.optedIn && empId) {
-            await OneSignal.login(empId);
-          }
-        });
-      } catch (err) {
-        showDebugBar("❌ OneSignalエラー: " + err.message, "#dc2626", false);
+      // すでにログイン済みの社員IDが保存されていれば再紐付け
+      const savedEmpId = localStorage.getItem("tss_emp_id");
+      if (savedEmpId) {
+        await OneSignal.login(savedEmpId);
       }
+
+      // 通知許可を後からONにした瞬間にも社員IDを確実に紐付ける
+      OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
+        const empId = localStorage.getItem("tss_emp_id");
+        if (event.current.optedIn && empId) {
+          await OneSignal.login(empId);
+        }
+      });
     });
 
-    function updateDebugStatus(OneSignal) {
-      const isOptedIn = OneSignal.User.PushSubscription.optedIn;
-      const subId = OneSignal.User.PushSubscription.id;
-      if (isOptedIn && subId) {
-        // ★修正：登録OKの場合は3秒後に自動でバーを消す（画面に常駐させない）
-        showDebugBar("✅ 通知登録OK", "#16a34a", true);
-      } else {
-        showDebugBar("⚠️ ここをタップして通知をオンにする", "#d97706", false);
-      }
-    }
-
-    function showDebugBar(text, bgColor, autoHide) {
-      let bar = document.getElementById("os-debug-bar");
-      if (!bar) {
-        bar = document.createElement("div");
-        bar.id = "os-debug-bar";
-        bar.style.cssText = "position:fixed; top:4px; left:4px; z-index:99999; color:#fff; font-size:11px; font-weight:bold; padding:4px 8px; border-radius:4px; cursor:pointer; box-shadow:0 2px 4px rgba(0,0,0,0.2); transition: opacity 0.5s;";
-        bar.onclick = function() {
-          OneSignalDeferred.push(async function(OneSignal) {
-            await OneSignal.Notifications.requestPermission();
-          });
-        };
-        document.body.appendChild(bar);
-      }
-      bar.style.opacity = "1";
-      bar.style.display = "block";
-      bar.style.backgroundColor = bgColor;
-      bar.innerText = text;
-
-      if (autoHide) {
-        setTimeout(() => {
-          bar.style.opacity = "0";
-          setTimeout(() => { bar.style.display = "none"; }, 500);
-        }, 3000);
-      }
-    }
-
+    // GASからの合図（ログイン・ログアウト）を受け取る処理
     window.addEventListener("message", function(event) {
       if (!event.data) return;
 
