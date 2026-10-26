@@ -18,32 +18,113 @@
 
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async function(OneSignal) {
-      await OneSignal.init({
-        appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
-        serviceWorkerPath: currentPath.replace(/^\//, '') + "OneSignalSDKWorker.js",
-        serviceWorkerParam: { scope: currentPath },
-        notifyButton: {
-          // ★PCでも通知を使えるようにする場合は true のままにします。
-          // もし「スマホ・タブレットの時だけ右下のベルマークを出したい（PCでは完全に隠したい）」場合は、
-          // 下の行を enable: /iphone|ipad|ipod|android/i.test(navigator.userAgent) に書き換えてください。
-          enable: true
-        }
-      });
+      try {
+        await OneSignal.init({
+          appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
+          serviceWorkerPath: currentPath.replace(/^\//, '') + "OneSignalSDKWorker.js",
+          serviceWorkerParam: { scope: currentPath },
+          notifyButton: {
+            enable: true
+          }
+        });
 
-      // すでにログイン済みの社員IDが保存されていれば再紐付け
-      const savedEmpId = localStorage.getItem("tss_emp_id");
-      if (savedEmpId) {
-        await OneSignal.login(savedEmpId);
+        // 現在の登録状態をチェックしてバーを表示するか判定
+        checkAndShowPromptBar(OneSignal);
+
+        // すでにログイン済みの社員IDが保存されていれば再紐付け
+        const savedEmpId = localStorage.getItem("tss_emp_id");
+        if (savedEmpId) {
+          await OneSignal.login(savedEmpId);
+        }
+
+        // 通知状態が変化した瞬間の処理
+        OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
+          checkAndShowPromptBar(OneSignal);
+          const empId = localStorage.getItem("tss_emp_id");
+          if (event.current.optedIn && empId) {
+            await OneSignal.login(empId);
+          }
+        });
+      } catch (err) {
+        console.error("OneSignal初期化エラー:", err);
+      }
+    });
+
+    // ★改良：未登録の時だけバーを出し、登録済みの人や「×」で閉じた人には出さない
+    function checkAndShowPromptBar(OneSignal) {
+      const isOptedIn = OneSignal.User.PushSubscription.optedIn;
+      const subId = OneSignal.User.PushSubscription.id;
+      const bar = document.getElementById("os-debug-bar");
+
+      // すでに通知登録が完了している場合
+      if (isOptedIn && subId) {
+        // もしバーが出ていたら「登録OK」にして2秒後に完全に消す
+        if (bar && bar.style.display !== "none") {
+          showPromptBar("✅ 通知の設定が完了しました！", "#16a34a", true);
+        }
+        return;
       }
 
-      // 通知許可を後からONにした瞬間にも社員IDを確実に紐付ける
-      OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
-        const empId = localStorage.getItem("tss_emp_id");
-        if (event.current.optedIn && empId) {
-          await OneSignal.login(empId);
-        }
-      });
-    });
+      // この端末（PC等）で過去に「×」ボタンを押して閉じたことがある場合は表示しない
+      if (localStorage.getItem("tss_hide_push_bar") === "1") {
+        if (bar) bar.style.display = "none";
+        return;
+      }
+
+      // まだ通知が未登録の場合のみオレンジのバーを表示
+      showPromptBar("🔔 ここをタップして通知をONにする", "#d97706", false);
+    }
+
+    function showPromptBar(text, bgColor, autoHide) {
+      let bar = document.getElementById("os-debug-bar");
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.id = "os-debug-bar";
+        bar.style.cssText = "position:fixed; top:6px; left:6px; z-index:99999; color:#fff; font-size:12px; font-weight:bold; padding:6px 10px; border-radius:6px; box-shadow:0 2px 6px rgba(0,0,0,0.25); display:flex; align-items:center; gap:8px; transition: opacity 0.4s;";
+
+        // メッセージ部分（タップで確実にブラウザの許可＋購読ONを実行）
+        const textSpan = document.createElement("span");
+        textSpan.id = "os-debug-text";
+        textSpan.style.cursor = "pointer";
+        textSpan.onclick = function() {
+          OneSignalDeferred.push(async function(OneSignal) {
+            // ★重要：ブラウザ本体の通知許可を直接呼び出し、さらに強制的に購読をONにする
+            await OneSignal.Notifications.requestPermission();
+            await OneSignal.User.PushSubscription.optIn();
+            const empId = localStorage.getItem("tss_emp_id");
+            if (empId) await OneSignal.login(empId);
+            checkAndShowPromptBar(OneSignal);
+          });
+        };
+
+        // 閉じる「×」ボタン（PCなどで通知不要な場合に消せるようにする）
+        const closeBtn = document.createElement("span");
+        closeBtn.innerText = "✕";
+        closeBtn.title = "この端末では表示しない";
+        closeBtn.style.cssText = "cursor:pointer; padding:0 4px; font-size:14px; opacity:0.8; border-left:1px solid rgba(255,255,255,0.4); padding-left:8px;";
+        closeBtn.onclick = function(e) {
+          e.stopPropagation();
+          localStorage.setItem("tss_hide_push_bar", "1");
+          bar.style.display = "none";
+        };
+
+        bar.appendChild(textSpan);
+        bar.appendChild(closeBtn);
+        document.body.appendChild(bar);
+      }
+
+      bar.style.opacity = "1";
+      bar.style.display = "flex";
+      bar.style.backgroundColor = bgColor;
+      document.getElementById("os-debug-text").innerText = text;
+
+      if (autoHide) {
+        setTimeout(() => {
+          bar.style.opacity = "0";
+          setTimeout(() => { bar.style.display = "none"; }, 400);
+        }, 2000);
+      }
+    }
 
     // GASからの合図（ログイン・ログアウト）を受け取る処理
     window.addEventListener("message", function(event) {
