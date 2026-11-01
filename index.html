@@ -10,12 +10,89 @@
   <meta name="apple-mobile-web-app-title" content="TSSポータル">
   <link rel="apple-touch-icon" href="./icon-192.png">
 
- 
   <!-- OneSignal SDK の読み込み -->
   <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
   <script>
     const currentPath = window.location.pathname.replace(/\/[^\/]*$/, '/');
 
+    // ★GASの受信窓口URL（認証リダイレクトを避けるため標準の /macros/s/... エンドポイントを使用）
+    const GAS_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbywoTJGglKIMRd0UCYhECGQRnopD5lLb_oSfE1OhbKnwJNA4f4vbP7_LHhxFi9ANUd7-A/exec";
+
+    // =========================================================
+    // 1. Service Worker（バックグラウンド着信検知）と社員IDを共有するためのIndexedDB保存関数
+    // =========================================================
+    function syncEmpIdToIndexedDB(empId) {
+      if (!empId || !window.indexedDB) return;
+      try {
+        const req = indexedDB.open("tss_portal_push_db", 1);
+        req.onupgradeneeded = function(e) {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains("kv")) {
+            db.createObjectStore("kv");
+          }
+        };
+        req.onsuccess = function(e) {
+          const db = e.target.result;
+          const tx = db.transaction("kv", "readwrite");
+          tx.objectStore("kv").put(String(empId).trim(), "tss_emp_id");
+        };
+      } catch (e) {}
+    }
+
+    // =========================================================
+    // 2. ログイン前に「通知タップ（OPENED）」「端末着信（RECEIVED）」をGASへ送信する関数
+    // =========================================================
+    function sendPushTrackBeforeLogin(eventType, anpiId) {
+      try {
+        const empId = localStorage.getItem("tss_emp_id");
+        if (!empId) return;
+
+        // 短時間の重複送信を防止（1分間に1回まで）
+        const nowMin = Math.floor(Date.now() / 60000);
+        const dedupKey = `TSS_TRACK_${eventType}_${anpiId || 'ACTIVE'}_${nowMin}`;
+        if (sessionStorage.getItem(dedupKey)) return;
+        sessionStorage.setItem(dedupKey, "1");
+
+        const payload = JSON.stringify({
+          action: "ANPI_PUSH_TRACK",
+          userId: String(empId).trim(),
+          eventType: eventType, // "OPENED" または "RECEIVED"
+          anpiId: anpiId || ""
+        });
+
+        fetch(GAS_WEBHOOK_URL, {
+          method: "POST",
+          mode: "no-cors",
+          keepalive: true,
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: payload
+        }).catch(function() {});
+      } catch (e) {}
+    }
+
+    // 起動時：すでに保存されている社員IDがあればIndexedDBへ同期し、ログイン前起動（通知タップ）を記録
+    window.addEventListener("DOMContentLoaded", function() {
+      const savedEmpId = localStorage.getItem("tss_emp_id");
+      if (savedEmpId) {
+        syncEmpIdToIndexedDB(savedEmpId);
+        const params = new URLSearchParams(window.location.search);
+        const anpiId = params.get("anpiId") || "";
+        // アプリ（ログイン画面）が開かれた瞬間に、ログイン前アクセスとしてGASへ通知
+        sendPushTrackBeforeLogin("OPENED", anpiId);
+      }
+    });
+
+    // アプリがバックグラウンドから前面に切り替わった瞬間（通知タップでの復帰時）にも記録
+    document.addEventListener("visibilitychange", function() {
+      if (document.visibilityState === "visible") {
+        const params = new URLSearchParams(window.location.search);
+        sendPushTrackBeforeLogin("OPENED", params.get("anpiId") || "");
+      }
+    });
+
+    // =========================================================
+    // 3. OneSignal 初期化 ＆ イベント監視
+    // =========================================================
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async function(OneSignal) {
       try {
@@ -23,26 +100,36 @@
           appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
           serviceWorkerPath: currentPath.replace(/^\//, '') + "OneSignalSDKWorker.js",
           serviceWorkerParam: { scope: currentPath },
-          // ★修正：右下のベルマークも非表示にして、オレンジのバーに完全一本化
           notifyButton: {
             enable: false
           }
         });
 
-        // 現在の登録状態をチェックしてオレンジのバーを表示するか判定
         checkAndShowPromptBar(OneSignal);
 
-        // すでにログイン済みの社員IDが保存されていれば再紐付け
         const savedEmpId = localStorage.getItem("tss_emp_id");
         if (savedEmpId) {
+          syncEmpIdToIndexedDB(savedEmpId);
           await OneSignal.login(savedEmpId);
         }
 
-        // 通知状態が変化した瞬間の処理
+        // 通知バナーがクリック（タップ）された瞬間
+        OneSignal.Notifications.addEventListener("click", function(event) {
+          const data = (event && event.notification && event.notification.additionalData) || {};
+          sendPushTrackBeforeLogin("OPENED", data.anpiId || "");
+        });
+
+        // アプリを開いている状態で通知が着信した瞬間
+        OneSignal.Notifications.addEventListener("foregroundWillDisplay", function(event) {
+          const data = (event && event.notification && event.notification.additionalData) || {};
+          sendPushTrackBeforeLogin("RECEIVED", data.anpiId || "");
+        });
+
         OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
           checkAndShowPromptBar(OneSignal);
           const empId = localStorage.getItem("tss_emp_id");
           if (event.current.optedIn && empId) {
+            syncEmpIdToIndexedDB(empId);
             await OneSignal.login(empId);
           }
         });
@@ -51,13 +138,11 @@
       }
     });
 
-    // 未登録の時だけバーを出し、登録済みの人や「✕」で閉じた人には出さない
     function checkAndShowPromptBar(OneSignal) {
       const isOptedIn = OneSignal.User.PushSubscription.optedIn;
       const subId = OneSignal.User.PushSubscription.id;
       const bar = document.getElementById("os-debug-bar");
 
-      // すでに通知登録が完了している場合
       if (isOptedIn && subId) {
         if (bar && bar.style.display !== "none") {
           showPromptBar("✅ 通知の設定が完了しました！", "#16a34a", true);
@@ -65,13 +150,11 @@
         return;
       }
 
-      // この端末（PC等）で過去に「✕」ボタンを押して閉じたことがある場合は表示しない
       if (localStorage.getItem("tss_hide_push_bar") === "1") {
         if (bar) bar.style.display = "none";
         return;
       }
 
-      // まだ通知が未登録の場合のみオレンジのバーを表示
       showPromptBar("🔔 ここをタップして通知を「許可」してください", "#d97706", false);
     }
 
@@ -82,7 +165,6 @@
         bar.id = "os-debug-bar";
         bar.style.cssText = "position:fixed; top:8px; left:8px; z-index:99999; color:#fff; font-size:13px; font-weight:bold; padding:8px 12px; border-radius:6px; box-shadow:0 3px 8px rgba(0,0,0,0.3); display:flex; align-items:center; gap:10px; transition: opacity 0.4s;";
 
-        // メッセージ部分（タップでブラウザ本体の許可＋OneSignal購読ONを一発実行）
         const textSpan = document.createElement("span");
         textSpan.id = "os-debug-text";
         textSpan.style.cursor = "pointer";
@@ -91,12 +173,14 @@
             await OneSignal.Notifications.requestPermission();
             await OneSignal.User.PushSubscription.optIn();
             const empId = localStorage.getItem("tss_emp_id");
-            if (empId) await OneSignal.login(empId);
+            if (empId) {
+              syncEmpIdToIndexedDB(empId);
+              await OneSignal.login(empId);
+            }
             checkAndShowPromptBar(OneSignal);
           });
         };
 
-        // 閉じる「✕」ボタン（PCなどで通知不要な場合に消せるようにする）
         const closeBtn = document.createElement("span");
         closeBtn.innerText = "✕";
         closeBtn.title = "この端末では表示しない";
@@ -132,6 +216,7 @@
       if (event.data.type === "TSS_LOGIN" && event.data.userId) {
         const empId = String(event.data.userId).trim();
         localStorage.setItem("tss_emp_id", empId);
+        syncEmpIdToIndexedDB(empId);
         OneSignalDeferred.push(async function(OneSignal) {
           await OneSignal.login(empId);
         });
