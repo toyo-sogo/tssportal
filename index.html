@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>TSS社内ポータル</title>
   <link rel="manifest" href="./manifest.json">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="TSSポータル">
@@ -15,8 +16,198 @@
   <script>
     const currentPath = window.location.pathname.replace(/\/[^\/]*$/, '/');
 
-    // ★GASの受信窓口URL（認証リダイレクトを避けるため標準の /macros/s/... エンドポイントを使用）
+    // ★1箇所目：GASの受信窓口URL（認証リダイレクトを避けるため標準の /macros/s/... エンドポイントを使用）
     const GAS_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbywoTJGglKIMRd0UCYhECGQRnopD5lLb_oSfE1OhbKnwJNA4f4vbP7_LHhxFi9ANUd7-A/exec";
+
+    let oneSignalInstance = null;
+    let deferredInstallPrompt = null;
+    let adminBypassTapCount = 0;
+
+    // Android Chrome用のPWAインストールプロンプト保持
+    window.addEventListener("beforeinstallprompt", function(e) {
+      e.preventDefault();
+      deferredInstallPrompt = e;
+      const installBtn = document.getElementById("android-direct-install-btn");
+      if (installBtn) installBtn.style.display = "block";
+    });
+
+    // =========================================================
+    // 端末・PWA状態・通知許可状態の判定ロジック
+    // =========================================================
+    function getDeviceEnvironment() {
+      const ua = navigator.userAgent || "";
+      const isIOS = /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+      const isAndroid = /Android/i.test(ua);
+      const isMobile = isIOS || isAndroid;
+      const isInAppBrowser = /Line|Instagram|FBAN|FBAV|YJApp/i.test(ua);
+
+      // ホーム画面からアプリ（PWA）として起動しているか判定
+      const isStandalone = window.matchMedia("(display-mode: standalone)").matches
+        || window.navigator.standalone === true
+        || document.referrer.includes("android-app://");
+
+      // URLパラメータ（共用端末 ?shared=1 など）または管理者スキップ済みの判定
+      const params = new URLSearchParams(window.location.search);
+      const isExempt = !isMobile
+        || params.get("shared") === "1"
+        || params.has("ssoToken")
+        || localStorage.getItem("tss_setup_bypass") === "1";
+
+      // 通知許可の状態（"granted" / "denied" / "default" / "unsupported"）
+      let notifPermission = "unsupported";
+      if ("Notification" in window) {
+        notifPermission = Notification.permission;
+      }
+      if (oneSignalInstance && oneSignalInstance.User && oneSignalInstance.User.PushSubscription) {
+        if (oneSignalInstance.User.PushSubscription.optedIn) {
+          notifPermission = "granted";
+        }
+      }
+
+      return {
+        isIOS: isIOS,
+        isAndroid: isAndroid,
+        isMobile: isMobile,
+        isInAppBrowser: isInAppBrowser,
+        isStandalone: isStandalone,
+        isExempt: isExempt,
+        notifPermission: notifPermission
+      };
+    }
+
+    // 状態に応じて「セットアップ誘導画面」と「GASログイン画面(iframe)」を切り替え
+    function evaluateSetupGate() {
+      const gateOverlay = document.getElementById("pwa-setup-gate");
+      const iframeEl = document.getElementById("gas-portal-frame");
+      if (!gateOverlay || !iframeEl) return;
+
+      const env = getDeviceEnvironment();
+
+      // PC・共用端末、または「PWA起動 かつ 通知許可済み」ならゲートを閉じてログイン画面を表示
+      if (env.isExempt || (env.isStandalone && env.notifPermission === "granted")) {
+        gateOverlay.style.display = "none";
+        iframeEl.style.visibility = "visible";
+        iframeEl.style.pointerEvents = "auto";
+        return;
+      }
+
+      // 条件未達の場合はログイン画面（iframe）を隠して操作ロック
+      iframeEl.style.visibility = "hidden";
+      iframeEl.style.pointerEvents = "none";
+      gateOverlay.style.display = "flex";
+
+      const stepBadge = document.getElementById("gate-step-badge");
+      const step1Box = document.getElementById("gate-step1-pwa");
+      const step2Box = document.getElementById("gate-step2-push");
+      const inAppBox = document.getElementById("gate-inapp-warning");
+      const iosGuide = document.getElementById("guide-ios-box");
+      const androidGuide = document.getElementById("guide-android-box");
+      const pushDefaultBox = document.getElementById("push-default-box");
+      const pushDeniedBox = document.getElementById("push-denied-box");
+
+      // ① LINE等のアプリ内ブラウザで開いてしまった場合
+      if (env.isInAppBrowser && !env.isStandalone) {
+        stepBadge.innerText = "ブラウザ確認";
+        inAppBox.style.display = "block";
+        step1Box.style.display = "none";
+        step2Box.style.display = "none";
+        return;
+      }
+      inAppBox.style.display = "none";
+
+      // ② まだホーム画面に追加していない（ブラウザで開いている）場合 ➔ STEP 1を表示
+      if (!env.isStandalone) {
+        stepBadge.innerText = "初回セットアップ 1 / 2";
+        step1Box.style.display = "block";
+        step2Box.style.display = "none";
+        iosGuide.style.display = env.isIOS ? "block" : "none";
+        androidGuide.style.display = env.isIOS ? "none" : "block";
+        return;
+      }
+
+      // ③ ホーム画面（PWA）から起動したが、通知がまだオンになっていない場合 ➔ STEP 2を表示
+      stepBadge.innerText = "初回セットアップ 2 / 2";
+      step1Box.style.display = "none";
+      step2Box.style.display = "block";
+
+      if (env.notifPermission === "denied") {
+        pushDefaultBox.style.display = "none";
+        pushDeniedBox.style.display = "block";
+      } else {
+        pushDefaultBox.style.display = "block";
+        pushDeniedBox.style.display = "none";
+      }
+    }
+
+    // Androidのワンタップインストールボタン押下時
+    async function triggerAndroidInstall() {
+      if (!deferredInstallPrompt) return;
+      deferredInstallPrompt.prompt();
+      await deferredInstallPrompt.userChoice;
+      deferredInstallPrompt = null;
+      const installBtn = document.getElementById("android-direct-install-btn");
+      if (installBtn) installBtn.style.display = "none";
+    }
+
+    // LINE等のアプリ内ブラウザから標準ブラウザで開き直す処理
+    function openInExternalBrowser() {
+      const url = window.location.href;
+      if (url.includes("openExternalBrowser=1")) return;
+      const sep = url.includes("?") ? "&" : "?";
+      window.location.href = url + sep + "openExternalBrowser=1";
+    }
+
+    // STEP 2：「通知をオンにしてログイン画面へ進む」ボタン押下時
+    function requestPushPermissionFromGate() {
+      const btn = document.getElementById("gate-enable-push-btn");
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = "通知設定を確認中...";
+      }
+
+      const finishCheck = function() {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = "🔔 通知をオンにしてログイン画面へ進む";
+        }
+        evaluateSetupGate();
+      };
+
+      if (window.OneSignalDeferred) {
+        OneSignalDeferred.push(async function(OneSignal) {
+          try {
+            await OneSignal.Notifications.requestPermission();
+            await OneSignal.User.PushSubscription.optIn();
+            const empId = localStorage.getItem("tss_emp_id");
+            if (empId) {
+              syncEmpIdToIndexedDB(empId);
+              await OneSignal.login(empId);
+            }
+          } catch (e) {
+            console.error("通知許可リクエストエラー:", e);
+          }
+          setTimeout(finishCheck, 400);
+        });
+      } else if ("Notification" in window) {
+        Notification.requestPermission().then(function() {
+          setTimeout(finishCheck, 300);
+        });
+      } else {
+        finishCheck();
+      }
+    }
+
+    // 管理者用隠しコマンド：上部バッジを5回タップで強制スキップ可能にする
+    function onTapAdminBypassBadge() {
+      adminBypassTapCount++;
+      if (adminBypassTapCount >= 5) {
+        adminBypassTapCount = 0;
+        if (confirm("【管理者用確認】\n端末非対応などの理由により、アプリ化・通知チェックをスキップしてログイン画面を表示しますか？")) {
+          localStorage.setItem("tss_setup_bypass", "1");
+          evaluateSetupGate();
+        }
+      }
+    }
 
     // =========================================================
     // 1. Service Worker（バックグラウンド着信検知）と社員IDを共有するためのIndexedDB保存関数
@@ -70,21 +261,23 @@
       } catch (e) {}
     }
 
-    // 起動時：すでに保存されている社員IDがあればIndexedDBへ同期し、ログイン前起動（通知タップ）を記録
+    // 起動時：セットアップ状態の判定 ＆ IndexedDB同期
     window.addEventListener("DOMContentLoaded", function() {
+      evaluateSetupGate();
+
       const savedEmpId = localStorage.getItem("tss_emp_id");
       if (savedEmpId) {
         syncEmpIdToIndexedDB(savedEmpId);
         const params = new URLSearchParams(window.location.search);
         const anpiId = params.get("anpiId") || "";
-        // アプリ（ログイン画面）が開かれた瞬間に、ログイン前アクセスとしてGASへ通知
         sendPushTrackBeforeLogin("OPENED", anpiId);
       }
     });
 
-    // アプリがバックグラウンドから前面に切り替わった瞬間（通知タップでの復帰時）にも記録
+    // アプリがバックグラウンドから前面に切り替わった瞬間にも判定・記録
     document.addEventListener("visibilitychange", function() {
       if (document.visibilityState === "visible") {
+        evaluateSetupGate();
         const params = new URLSearchParams(window.location.search);
         sendPushTrackBeforeLogin("OPENED", params.get("anpiId") || "");
       }
@@ -96,7 +289,9 @@
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async function(OneSignal) {
       try {
+        oneSignalInstance = OneSignal;
         await OneSignal.init({
+          // ★2箇所目：OneSignalのApp ID
           appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
           serviceWorkerPath: currentPath.replace(/^\//, '') + "OneSignalSDKWorker.js",
           serviceWorkerParam: { scope: currentPath },
@@ -105,6 +300,7 @@
           }
         });
 
+        evaluateSetupGate();
         checkAndShowPromptBar(OneSignal);
 
         const savedEmpId = localStorage.getItem("tss_emp_id");
@@ -126,6 +322,7 @@
         });
 
         OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
+          evaluateSetupGate();
           checkAndShowPromptBar(OneSignal);
           const empId = localStorage.getItem("tss_emp_id");
           if (event.current.optedIn && empId) {
@@ -135,10 +332,19 @@
         });
       } catch (err) {
         console.error("OneSignal初期化エラー:", err);
+        evaluateSetupGate();
       }
     });
 
     function checkAndShowPromptBar(OneSignal) {
+      // セットアップゲート表示中は上部のデバッグバーを重複表示しない
+      const gateOverlay = document.getElementById("pwa-setup-gate");
+      if (gateOverlay && gateOverlay.style.display !== "none") {
+        const bar = document.getElementById("os-debug-bar");
+        if (bar) bar.style.display = "none";
+        return;
+      }
+
       const isOptedIn = OneSignal.User.PushSubscription.optedIn;
       const subId = OneSignal.User.PushSubscription.id;
       const bar = document.getElementById("os-debug-bar");
@@ -177,6 +383,7 @@
               syncEmpIdToIndexedDB(empId);
               await OneSignal.login(empId);
             }
+            evaluateSetupGate();
             checkAndShowPromptBar(OneSignal);
           });
         };
@@ -228,11 +435,232 @@
     });
   </script>
   <style>
-    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #f3f4f6; }
-    iframe { width: 100%; height: 100%; border: none; display: block; }
+    body, html {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #f3f4f6;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+      display: block;
+    }
+    /* 初回セットアップ強制ゲート（PWA化＋通知許可が完了するまで表示） */
+    #pwa-setup-gate {
+      position: fixed;
+      inset: 0;
+      z-index: 90000;
+      background: linear-gradient(145deg, #1e293b 0%, #0f172a 100%);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      box-sizing: border-box;
+      overflow-y: auto;
+    }
+    .gate-card {
+      background: #ffffff;
+      width: 100%;
+      max-width: 420px;
+      border-radius: 16px;
+      padding: 24px 20px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+      box-sizing: border-box;
+      color: #1f2937;
+    }
+    .gate-badge {
+      display: inline-block;
+      background: #2563eb;
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: bold;
+      padding: 4px 12px;
+      border-radius: 999px;
+      margin-bottom: 10px;
+      user-select: none;
+    }
+    .gate-title {
+      font-size: 18px;
+      font-weight: 800;
+      margin: 0 0 8px 0;
+      color: #111827;
+      line-height: 1.4;
+    }
+    .gate-alert {
+      background: #fef2f2;
+      border: 1.5px solid #fecaca;
+      color: #b91c1c;
+      font-size: 13px;
+      font-weight: bold;
+      padding: 10px 12px;
+      border-radius: 10px;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+    .gate-step-list {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 14px;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+    .gate-step-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .gate-step-item:last-child {
+      margin-bottom: 0;
+    }
+    .gate-num {
+      background: #2563eb;
+      color: #fff;
+      font-weight: bold;
+      font-size: 12px;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .gate-btn {
+      width: 100%;
+      background: #16a34a;
+      color: #ffffff;
+      border: none;
+      border-radius: 12px;
+      padding: 15px 16px;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(22, 163, 74, 0.3);
+    }
+    .gate-btn:active {
+      transform: translateY(1px);
+    }
+    .gate-btn-primary {
+      background: #2563eb;
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+    }
   </style>
 </head>
 <body>
+
+  <!-- ▼ スマホ初回アクセス時の2ステップ・ロック画面 ▼ -->
+  <div id="pwa-setup-gate">
+    <div class="gate-card">
+      <div style="text-align: center;">
+        <span id="gate-step-badge" class="gate-badge" onclick="onTapAdminBypassBadge()">初回セットアップ 1 / 2</span>
+        <div style="font-size: 13px; color: #6b7280; font-weight: bold; margin-bottom: 12px;">TSS社内ポータル</div>
+      </div>
+
+      <!-- 0. LINE等のアプリ内ブラウザで開いた場合の警告 -->
+      <div id="gate-inapp-warning" style="display: none;">
+        <h2 class="gate-title">標準ブラウザで開き直してください</h2>
+        <div class="gate-alert">
+          ⚠️ LINE等のアプリ内カメラから開くと、アプリの登録や通知設定ができません。
+        </div>
+        <div class="gate-step-list">
+          画面の右上または右下にあるメニューから<b>「ブラウザで開く（Safari / Chromeで開く）」</b>を選択してください。
+        </div>
+        <button type="button" class="gate-btn gate-btn-primary" onclick="openInExternalBrowser()">
+          標準ブラウザで開く
+        </button>
+      </div>
+
+      <!-- STEP 1：ホーム画面に追加（未アプリ化・ブラウザ表示中） -->
+      <div id="gate-step1-pwa" style="display: none;">
+        <h2 class="gate-title">① ホーム画面に追加してください</h2>
+        <div class="gate-alert">
+          🔒 ブラウザ画面のままではID・パスワードは入力できません。<br>
+          以下の手順でホーム画面に追加し、<b>追加されたアイコンから開くとログイン画面に進めます。</b>
+        </div>
+
+        <!-- iPhone (Safari) 用案内 -->
+        <div id="guide-ios-box" class="gate-step-list" style="display: none;">
+          <div style="font-weight: bold; color: #2563eb; margin-bottom: 8px;">📱 iPhone（Safari）の手順</div>
+          <div class="gate-step-item">
+            <span class="gate-num">1</span>
+            <div>画面下部（または上部）の<b>「共有」ボタン［↑］</b>をタップします。</div>
+          </div>
+          <div class="gate-step-item">
+            <span class="gate-num">2</span>
+            <div>メニューを下にスクロールし、<b>「ホーム画面に追加」［＋］</b>をタップします。</div>
+          </div>
+          <div class="gate-step-item">
+            <span class="gate-num">3</span>
+            <div>右上の<b>「追加」</b>を押し、スマホのホーム画面に作られた<b>「TSSポータル」アイコンから起動</b>してください。</div>
+          </div>
+        </div>
+
+        <!-- Android (Chrome) 用案内 -->
+        <div id="guide-android-box" class="gate-step-list" style="display: none;">
+          <div style="font-weight: bold; color: #2563eb; margin-bottom: 8px;">📱 Android（Chrome）の手順</div>
+          <button type="button" id="android-direct-install-btn" class="gate-btn gate-btn-primary" style="display: none; margin-bottom: 12px;" onclick="triggerAndroidInstall()">
+            📲 アプリをインストール（ホーム画面に追加）
+          </button>
+          <div class="gate-step-item">
+            <span class="gate-num">1</span>
+            <div>画面右上のメニュー<b>「︙」</b>をタップします。</div>
+          </div>
+          <div class="gate-step-item">
+            <span class="gate-num">2</span>
+            <div><b>「アプリをインストール」</b>または<b>「ホーム画面に追加」</b>をタップします。</div>
+          </div>
+          <div class="gate-step-item">
+            <span class="gate-num">3</span>
+            <div>スマホのホーム画面に作られた<b>「TSSポータル」アイコンから起動</b>してください。</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STEP 2：通知の許可（ホーム画面アイコンから起動後） -->
+      <div id="gate-step2-push" style="display: none;">
+        <h2 class="gate-title">② 通知を「許可」してください</h2>
+
+        <!-- 通常（未許可）状態 -->
+        <div id="push-default-box">
+          <div class="gate-alert" style="background: #eff6ff; border-color: #bfdbfe; color: #1e40af;">
+            📢 緊急時の安否確認や重要なお知らせを受け取るため、通知をオンにすると<b>ID・パスワード入力画面</b>が表示されます。
+          </div>
+          <div class="gate-step-list">
+            下のボタンを押すと確認メッセージが表示されますので、必ず<b>「許可（Allow）」</b>をタップしてください。
+          </div>
+          <button type="button" id="gate-enable-push-btn" class="gate-btn" onclick="requestPushPermissionFromGate()">
+            🔔 通知をオンにしてログイン画面へ進む
+          </button>
+        </div>
+
+        <!-- 誤って「ブロック（許可しない）」を押してしまった場合 -->
+        <div id="push-denied-box" style="display: none;">
+          <div class="gate-alert">
+            ❌ 通知が「許可しない（ブロック）」に設定されているため、ログイン画面へ進めません。
+          </div>
+          <div class="gate-step-list">
+            <b>【解除手順】</b><br>
+            スマホ本体の<b>「設定」＞「通知（またはアプリ）」＞「TSSポータル」</b>を開き、通知を<b>オン（許可）</b>に切り替えてから下のボタンを押してください。
+          </div>
+          <button type="button" class="gate-btn gate-btn-primary" onclick="evaluateSetupGate()">
+            🔄 設定変更後に再確認する
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ★3箇所目：GASの社内ポータルURL -->
   <iframe src="https://script.google.com/a/macros/toyosogo-portal.com/s/AKfycbywoTJGglKIMRd0UCYhECGQRnopD5lLb_oSfE1OhbKnwJNA4f4vbP7_LHhxFi9ANUd7-A/exec" allow="geolocation; clipboard-write"></iframe>
 </body>
 </html>
