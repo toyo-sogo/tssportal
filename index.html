@@ -336,6 +336,36 @@
       }
     });
 
+    // =========================================================
+    // アプリアイコンの数字バッジ（未読件数）を更新・保持する関数
+    // =========================================================
+    function updatePwaAppBadge(count) {
+      const num = Math.max(0, parseInt(count, 10) || 0);
+      localStorage.setItem("tss_unread_badge_count", String(num));
+
+      if ("setAppBadge" in navigator && "clearAppBadge" in navigator) {
+        if (num > 0) {
+          navigator.setAppBadge(num).catch(function() {});
+        } else {
+          navigator.clearAppBadge().catch(function() {});
+        }
+      }
+    }
+
+    // 通知タップ時・着信時に、未読を確認するまでバッジ（最低1以上）を残す関数
+    function retainBadgeUntilRead() {
+      const saved = parseInt(localStorage.getItem("tss_unread_badge_count") || "0", 10);
+      updatePwaAppBadge(saved > 0 ? saved : 1);
+    }
+
+    // アプリ起動時・前面復帰時に、OS側で消されたバッジを再点灯させる関数
+    function restoreSavedAppBadge() {
+      const saved = parseInt(localStorage.getItem("tss_unread_badge_count") || "0", 10);
+      if (saved > 0 && "setAppBadge" in navigator) {
+        navigator.setAppBadge(saved).catch(function() {});
+      }
+    }
+
     function checkAndShowPromptBar(OneSignal) {
       // セットアップゲート表示中は上部のデバッグバーを重複表示しない
       const gateOverlay = document.getElementById("pwa-setup-gate");
