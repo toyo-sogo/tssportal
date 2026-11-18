@@ -88,13 +88,49 @@ self.addEventListener("notificationclick", function(event) {
   event.waitUntil(reportPushEventToGas("OPENED", anpiId));
 });
 
+// ★プッシュ通知の着信時に、現在のバッジ件数を＋1してアイコンに表示
+function incrementAppBadgeOnPush() {
+  return new Promise(function(resolve) {
+    try {
+      const req = indexedDB.open("tss_portal_push_db", 1);
+      req.onupgradeneeded = function(e) {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains("kv")) {
+          db.createObjectStore("kv");
+        }
+      };
+      req.onsuccess = function(e) {
+        const db = e.target.result;
+        const tx = db.transaction("kv", "readwrite");
+        const store = tx.objectStore("kv");
+        const getReq = store.get("tss_badge_count");
+
+        getReq.onsuccess = function() {
+          const current = parseInt(getReq.result, 10) || 0;
+          const nextCount = current + 1;
+          store.put(nextCount, "tss_badge_count");
+
+          if (self.navigator && typeof self.navigator.setAppBadge === "function") {
+            self.navigator.setAppBadge(nextCount).catch(function() {}).finally(resolve);
+          } else {
+            resolve();
+          }
+        };
+        getReq.onerror = function() { resolve(); };
+      };
+      req.onerror = function() { resolve(); };
+    } catch (err) {
+      resolve();
+    }
+  });
+}
+
 self.addEventListener("push", function(event) {
-  if (self.navigator && typeof self.navigator.setAppBadge === "function") {
-    event.waitUntil(
-      self.navigator.setAppBadge(1).catch(function() {})
-    );
-  }
+  event.waitUntil(incrementAppBadgeOnPush());
 });
+
+// OneSignal公式Service Worker本体の読み込み（一番下のまま維持）
+importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");
 
 // OneSignal公式Service Worker本体の読み込み
 importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");
