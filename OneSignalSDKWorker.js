@@ -88,13 +88,13 @@ self.addEventListener("notificationclick", function(event) {
   event.waitUntil(reportPushEventToGas("OPENED", anpiId));
 });
 
-// ★プッシュ通知の連続着信でも確実に 1 → 2 → 3 と増やす強化版バッジ処理
+// ★プッシュ通知の着信時に、純粋に「現在のアプリ内未読数 ＋ 1」だけを反映する処理
 let _swBadgeCountCache = 0;
 let _lastPushTime = 0;
 
 async function incrementAppBadgeOnPush() {
   try {
-    // 1. IndexedDBから現在のカウントを取得
+    // 1. IndexedDBから現在のアプリ内未読カウントを取得（既読にしていれば 0 が返る）
     const dbCount = await new Promise(function(resolve) {
       try {
         const req = indexedDB.open("tss_portal_push_db", 1);
@@ -115,22 +115,15 @@ async function incrementAppBadgeOnPush() {
       }
     });
 
-    // 2. 10秒以内の連続着信時はメモリ上の数値も考慮して確実に＋1する
+    // 2. 10秒以内の連続着信時のみメモリ上の数値も考慮し、それ以外は dbCount を基準に＋1する
     const now = Date.now();
     const baseCount = (now - _lastPushTime < 10000) ? Math.max(_swBadgeCountCache, dbCount) : dbCount;
     _lastPushTime = now;
 
-    // 3. スマホの通知欄に現在残っている未読通知の数も取得して比較
-    let activeNotifCount = 0;
-    if (self.registration && typeof self.registration.getNotifications === "function") {
-      const notifs = await self.registration.getNotifications();
-      activeNotifCount = (notifs ? notifs.length : 0) + 1;
-    }
-
-    const nextCount = Math.max(baseCount + 1, activeNotifCount, 1);
+    const nextCount = baseCount + 1;
     _swBadgeCountCache = nextCount;
 
-    // 4. IndexedDBへ新しい数値を保存（保存完了まで待機）
+    // 3. IndexedDBへ新しい数値を保存
     await new Promise(function(resolve) {
       try {
         const req = indexedDB.open("tss_portal_push_db", 1);
@@ -147,7 +140,7 @@ async function incrementAppBadgeOnPush() {
       }
     });
 
-    // 5. アイコンバッジを即時反映 ＋ OneSignalの通知表示後（0.5秒後）にも再反映して上書きを防ぐ
+    // 4. アイコンバッジを即時反映 ＋ OneSignalの通知表示後（0.5秒後）にも再反映
     if (self.navigator && typeof self.navigator.setAppBadge === "function") {
       await self.navigator.setAppBadge(nextCount).catch(function() {});
       await new Promise(function(r) { setTimeout(r, 500); });
@@ -160,5 +153,5 @@ self.addEventListener("push", function(event) {
   event.waitUntil(incrementAppBadgeOnPush());
 });
 
-// OneSignal公式Service Worker本体の読み込み（一番下のまま維持）
+// OneSignal公式Service Worker本体の読み込み（一番下の1行のみ維持）
 importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");
