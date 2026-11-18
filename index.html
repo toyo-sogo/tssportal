@@ -365,7 +365,7 @@
     function updatePwaAppBadge(count) {
       const num = Math.max(0, parseInt(count, 10) || 0);
       localStorage.setItem("tss_unread_badge_count", String(num));
-      saveBadgeCountToIndexedDB(num); // ★裏側のService Worker用にIndexedDBへも保存
+      saveBadgeCountToIndexedDB(num);
 
       if ("setAppBadge" in navigator && "clearAppBadge" in navigator) {
         if (num > 0) {
@@ -373,6 +373,17 @@
         } else {
           navigator.clearAppBadge().catch(function() {});
         }
+      }
+
+      // ★追加：未読が0件になったら、スマホの通知欄に放置されている古い通知も自動で消去する
+      if (num === 0 && "serviceWorker" in navigator) {
+        navigator.serviceWorker.getRegistration().then(function(reg) {
+          if (reg && typeof reg.getNotifications === "function") {
+            reg.getNotifications().then(function(notifs) {
+              (notifs || []).forEach(function(n) { n.close(); });
+            });
+          }
+        }).catch(function() {});
       }
     }
 
