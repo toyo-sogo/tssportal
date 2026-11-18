@@ -153,5 +153,21 @@ self.addEventListener("push", function(event) {
   event.waitUntil(incrementAppBadgeOnPush());
 });
 
+// ★アプリ内で既読になった際、スマホの通知欄に残っているバナー通知を消去＆キャッシュ同期
+self.addEventListener("message", function(event) {
+  if (!event.data) return;
+  if (event.data.type === "TSS_CLEAR_NOTIFICATIONS") {
+    if (typeof event.data.count === "number") {
+      _swBadgeCountCache = event.data.count;
+    }
+    event.waitUntil(
+      self.registration.getNotifications().then(function(notifs) {
+        (notifs || []).forEach(function(n) { n.close(); });
+      }).catch(function() {})
+    );
+  }
+});
+
+
 // OneSignal公式Service Worker本体の読み込み（一番下の1行のみ維持）
 importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");
