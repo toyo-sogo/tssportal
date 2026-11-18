@@ -362,7 +362,38 @@
       } catch (e) {}
     }
 
-    function updatePwaAppBadge(count) {
+    // スマホの通知欄に残っている通知バナーをService Worker経由で確実に消去する関数
+    function clearDisplayedPushNotifications(syncCount) {
+      if (!("serviceWorker" in navigator)) return;
+
+      if (typeof navigator.serviceWorker.getRegistrations === "function") {
+        navigator.serviceWorker.getRegistrations().then(function(regs) {
+          (regs || []).forEach(function(reg) {
+            if (reg && typeof reg.getNotifications === "function") {
+              reg.getNotifications().then(function(notifs) {
+                (notifs || []).forEach(function(n) { n.close(); });
+              }).catch(function() {});
+            }
+            if (reg && reg.active) {
+              reg.active.postMessage({
+                type: "TSS_CLEAR_NOTIFICATIONS",
+                count: typeof syncCount === "number" ? syncCount : 0
+              });
+            }
+          });
+        }).catch(function() {});
+      }
+
+      if (navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({
+          type: "TSS_CLEAR_NOTIFICATIONS",
+          count: typeof syncCount === "number" ? syncCount : 0
+        });
+      }
+    }
+
+    function updatePwaAppBadge(count, unreadMsgCount) {
+      const prev = parseInt(localStorage.getItem("tss_unread_badge_count") || "0", 10);
       const num = Math.max(0, parseInt(count, 10) || 0);
       localStorage.setItem("tss_unread_badge_count", String(num));
       saveBadgeCountToIndexedDB(num);
@@ -375,15 +406,10 @@
         }
       }
 
-      // ★追加：未読が0件になったら、スマホの通知欄に放置されている古い通知も自動で消去する
-      if (num === 0 && "serviceWorker" in navigator) {
-        navigator.serviceWorker.getRegistration().then(function(reg) {
-          if (reg && typeof reg.getNotifications === "function") {
-            reg.getNotifications().then(function(notifs) {
-              (notifs || []).forEach(function(n) { n.close(); });
-            });
-          }
-        }).catch(function() {});
+      // 未読が0件になった時、またはアプリ内で既読にして未読数が減った時に残っている通知バナーを消去
+      const isMsgZero = (typeof unreadMsgCount === "number" && unreadMsgCount === 0);
+      if (num === 0 || isMsgZero || num < prev) {
+        clearDisplayedPushNotifications(num);
       }
     }
 
@@ -512,7 +538,7 @@
       if (!event.data) return;
       // ★追加：home.html から未読件数を受け取ってアイコンバッジを更新（0件なら消去）
       if (event.data.type === "TSS_BADGE_UPDATE") {
-        updatePwaAppBadge(event.data.count);
+        updatePwaAppBadge(event.data.count, event.data.unreadMsgCount);
       }
 
       if (event.data.type === "TSS_LOGIN" && event.data.userId) {
