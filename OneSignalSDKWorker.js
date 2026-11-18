@@ -88,41 +88,72 @@ self.addEventListener("notificationclick", function(event) {
   event.waitUntil(reportPushEventToGas("OPENED", anpiId));
 });
 
-// ★プッシュ通知の着信時に、現在のバッジ件数を＋1してアイコンに表示
-function incrementAppBadgeOnPush() {
-  return new Promise(function(resolve) {
-    try {
-      const req = indexedDB.open("tss_portal_push_db", 1);
-      req.onupgradeneeded = function(e) {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains("kv")) {
-          db.createObjectStore("kv");
-        }
-      };
-      req.onsuccess = function(e) {
-        const db = e.target.result;
-        const tx = db.transaction("kv", "readwrite");
-        const store = tx.objectStore("kv");
-        const getReq = store.get("tss_badge_count");
+// ★プッシュ通知の連続着信でも確実に 1 → 2 → 3 と増やす強化版バッジ処理
+let _swBadgeCountCache = 0;
+let _lastPushTime = 0;
 
-        getReq.onsuccess = function() {
-          const current = parseInt(getReq.result, 10) || 0;
-          const nextCount = current + 1;
-          store.put(nextCount, "tss_badge_count");
-
-          if (self.navigator && typeof self.navigator.setAppBadge === "function") {
-            self.navigator.setAppBadge(nextCount).catch(function() {}).finally(resolve);
-          } else {
-            resolve();
-          }
+async function incrementAppBadgeOnPush() {
+  try {
+    // 1. IndexedDBから現在のカウントを取得
+    const dbCount = await new Promise(function(resolve) {
+      try {
+        const req = indexedDB.open("tss_portal_push_db", 1);
+        req.onupgradeneeded = function(e) {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
         };
-        getReq.onerror = function() { resolve(); };
-      };
-      req.onerror = function() { resolve(); };
-    } catch (err) {
-      resolve();
+        req.onsuccess = function(e) {
+          const db = e.target.result;
+          const tx = db.transaction("kv", "readonly");
+          const getReq = tx.objectStore("kv").get("tss_badge_count");
+          getReq.onsuccess = function() { resolve(parseInt(getReq.result, 10) || 0); };
+          getReq.onerror = function() { resolve(0); };
+        };
+        req.onerror = function() { resolve(0); };
+      } catch (e) {
+        resolve(0);
+      }
+    });
+
+    // 2. 10秒以内の連続着信時はメモリ上の数値も考慮して確実に＋1する
+    const now = Date.now();
+    const baseCount = (now - _lastPushTime < 10000) ? Math.max(_swBadgeCountCache, dbCount) : dbCount;
+    _lastPushTime = now;
+
+    // 3. スマホの通知欄に現在残っている未読通知の数も取得して比較
+    let activeNotifCount = 0;
+    if (self.registration && typeof self.registration.getNotifications === "function") {
+      const notifs = await self.registration.getNotifications();
+      activeNotifCount = (notifs ? notifs.length : 0) + 1;
     }
-  });
+
+    const nextCount = Math.max(baseCount + 1, activeNotifCount, 1);
+    _swBadgeCountCache = nextCount;
+
+    // 4. IndexedDBへ新しい数値を保存（保存完了まで待機）
+    await new Promise(function(resolve) {
+      try {
+        const req = indexedDB.open("tss_portal_push_db", 1);
+        req.onsuccess = function(e) {
+          const db = e.target.result;
+          const tx = db.transaction("kv", "readwrite");
+          tx.objectStore("kv").put(nextCount, "tss_badge_count");
+          tx.oncomplete = function() { resolve(); };
+          tx.onerror = function() { resolve(); };
+        };
+        req.onerror = function() { resolve(); };
+      } catch (e) {
+        resolve();
+      }
+    });
+
+    // 5. アイコンバッジを即時反映 ＋ OneSignalの通知表示後（0.5秒後）にも再反映して上書きを防ぐ
+    if (self.navigator && typeof self.navigator.setAppBadge === "function") {
+      await self.navigator.setAppBadge(nextCount).catch(function() {});
+      await new Promise(function(r) { setTimeout(r, 500); });
+      await self.navigator.setAppBadge(nextCount).catch(function() {});
+    }
+  } catch (err) {}
 }
 
 self.addEventListener("push", function(event) {
@@ -131,7 +162,3 @@ self.addEventListener("push", function(event) {
 
 // OneSignal公式Service Worker本体の読み込み（一番下のまま維持）
 importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");
-
-// OneSignal公式Service Worker本体の読み込み
-importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");
-
