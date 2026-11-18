@@ -16,12 +16,13 @@
   <script>
     const currentPath = window.location.pathname.replace(/\/[^\/]*$/, '/');
 
-    // ★1箇所目：GASの受信窓口URL（認証リダイレクトを避けるため標準の /macros/s/... エンドポイントを使用）
+    // ★1箇所目：GASの受信窓口URL（標準の /macros/s/... エンドポイント）
     const GAS_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbywoTJGglKIMRd0UCYhECGQRnopD5lLb_oSfE1OhbKnwJNA4f4vbP7_LHhxFi9ANUd7-A/exec";
 
     let oneSignalInstance = null;
     let deferredInstallPrompt = null;
     let adminBypassTapCount = 0;
+    let _lastLoggedInEmpId = "";
 
     // Android Chrome用のPWAインストールプロンプト保持
     window.addEventListener("beforeinstallprompt", function(e) {
@@ -32,7 +33,7 @@
     });
 
     // =========================================================
-    // 端末・PWA状態・通知許可状態の判定ロジック
+    // 0. 端末・PWA状態・通知許可状態の判定＆ロック画面制御
     // =========================================================
     function getDeviceEnvironment() {
       const ua = navigator.userAgent || "";
@@ -41,19 +42,16 @@
       const isMobile = isIOS || isAndroid;
       const isInAppBrowser = /Line|Instagram|FBAN|FBAV|YJApp/i.test(ua);
 
-      // ホーム画面からアプリ（PWA）として起動しているか判定
       const isStandalone = window.matchMedia("(display-mode: standalone)").matches
         || window.navigator.standalone === true
         || document.referrer.includes("android-app://");
 
-      // URLパラメータ（共用端末 ?shared=1 など）または管理者スキップ済みの判定
       const params = new URLSearchParams(window.location.search);
       const isExempt = !isMobile
         || params.get("shared") === "1"
         || params.has("ssoToken")
         || localStorage.getItem("tss_setup_bypass") === "1";
 
-      // 通知許可の状態（"granted" / "denied" / "default" / "unsupported"）
       let notifPermission = "unsupported";
       if ("Notification" in window) {
         notifPermission = Notification.permission;
@@ -75,7 +73,6 @@
       };
     }
 
-    // 状態に応じて「セットアップ誘導画面」と「GASログイン画面(iframe)」を切り替え
     function evaluateSetupGate() {
       const gateOverlay = document.getElementById("pwa-setup-gate");
       const iframeEl = document.getElementById("gas-portal-frame");
@@ -83,7 +80,6 @@
 
       const env = getDeviceEnvironment();
 
-      // PC・共用端末、または「PWA起動 かつ 通知許可済み」ならゲートを閉じてログイン画面を表示
       if (env.isExempt || (env.isStandalone && env.notifPermission === "granted")) {
         gateOverlay.style.display = "none";
         iframeEl.style.visibility = "visible";
@@ -91,7 +87,6 @@
         return;
       }
 
-      // 条件未達の場合はログイン画面（iframe）を隠して操作ロック
       iframeEl.style.visibility = "hidden";
       iframeEl.style.pointerEvents = "none";
       gateOverlay.style.display = "flex";
@@ -105,7 +100,6 @@
       const pushDefaultBox = document.getElementById("push-default-box");
       const pushDeniedBox = document.getElementById("push-denied-box");
 
-      // ① LINE等のアプリ内ブラウザで開いてしまった場合
       if (env.isInAppBrowser && !env.isStandalone) {
         stepBadge.innerText = "ブラウザ確認";
         inAppBox.style.display = "block";
@@ -115,7 +109,6 @@
       }
       inAppBox.style.display = "none";
 
-      // ② まだホーム画面に追加していない（ブラウザで開いている）場合 ➔ STEP 1を表示
       if (!env.isStandalone) {
         stepBadge.innerText = "初回セットアップ 1 / 2";
         step1Box.style.display = "block";
@@ -125,7 +118,6 @@
         return;
       }
 
-      // ③ ホーム画面（PWA）から起動したが、通知がまだオンになっていない場合 ➔ STEP 2を表示
       stepBadge.innerText = "初回セットアップ 2 / 2";
       step1Box.style.display = "none";
       step2Box.style.display = "block";
@@ -139,7 +131,6 @@
       }
     }
 
-    // Androidのワンタップインストールボタン押下時
     async function triggerAndroidInstall() {
       if (!deferredInstallPrompt) return;
       deferredInstallPrompt.prompt();
@@ -149,7 +140,6 @@
       if (installBtn) installBtn.style.display = "none";
     }
 
-    // LINE等のアプリ内ブラウザから標準ブラウザで開き直す処理
     function openInExternalBrowser() {
       const url = window.location.href;
       if (url.includes("openExternalBrowser=1")) return;
@@ -157,7 +147,7 @@
       window.location.href = url + sep + "openExternalBrowser=1";
     }
 
-    // STEP 2：「通知をオンにしてログイン画面へ進む」ボタン押下時
+    // STEP 2：「通知をオンにしてログイン画面へ進む」ボタン押下時（重複防止対応済み）
     function requestPushPermissionFromGate() {
       const btn = document.getElementById("gate-enable-push-btn");
       if (btn) {
@@ -177,11 +167,12 @@
         OneSignalDeferred.push(async function(OneSignal) {
           try {
             await OneSignal.Notifications.requestPermission();
-            await OneSignal.User.PushSubscription.optIn();
+            if (!OneSignal.User.PushSubscription.optedIn) {
+              await OneSignal.User.PushSubscription.optIn();
+            }
             const empId = localStorage.getItem("tss_emp_id");
             if (empId) {
-              syncEmpIdToIndexedDB(empId);
-              await OneSignal.login(empId);
+              await loginOneSignalOnce(OneSignal, empId);
             }
           } catch (e) {
             console.error("通知許可リクエストエラー:", e);
@@ -197,7 +188,6 @@
       }
     }
 
-    // 管理者用隠しコマンド：上部バッジを5回タップで強制スキップ可能にする
     function onTapAdminBypassBadge() {
       adminBypassTapCount++;
       if (adminBypassTapCount >= 5) {
@@ -210,7 +200,7 @@
     }
 
     // =========================================================
-    // 1. Service Worker（バックグラウンド着信検知）と社員IDを共有するためのIndexedDB保存関数
+    // 1. IndexedDB保存 ＆ OneSignal重複ログイン防止 ＆ バッジ・バナー制御
     // =========================================================
     function syncEmpIdToIndexedDB(empId) {
       if (!empId || !window.indexedDB) return;
@@ -230,120 +220,20 @@
       } catch (e) {}
     }
 
-    // =========================================================
-    // 2. ログイン前に「通知タップ（OPENED）」「端末着信（RECEIVED）」をGASへ送信する関数
-    // =========================================================
-    function sendPushTrackBeforeLogin(eventType, anpiId) {
+    // ★対策2-①：OneSignal.login の重複実行を防ぐ共通関数
+    async function loginOneSignalOnce(OneSignal, empId) {
+      const cleanId = String(empId || "").trim();
+      if (!cleanId) return;
+      syncEmpIdToIndexedDB(cleanId);
+      if (_lastLoggedInEmpId === cleanId) return;
+      _lastLoggedInEmpId = cleanId;
       try {
-        const empId = localStorage.getItem("tss_emp_id");
-        if (!empId) return;
-
-        // 短時間の重複送信を防止（1分間に1回まで）
-        const nowMin = Math.floor(Date.now() / 60000);
-        const dedupKey = `TSS_TRACK_${eventType}_${anpiId || 'ACTIVE'}_${nowMin}`;
-        if (sessionStorage.getItem(dedupKey)) return;
-        sessionStorage.setItem(dedupKey, "1");
-
-        const payload = JSON.stringify({
-          action: "ANPI_PUSH_TRACK",
-          userId: String(empId).trim(),
-          eventType: eventType, // "OPENED" または "RECEIVED"
-          anpiId: anpiId || ""
-        });
-
-        fetch(GAS_WEBHOOK_URL, {
-          method: "POST",
-          mode: "no-cors",
-          keepalive: true,
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: payload
-        }).catch(function() {});
-      } catch (e) {}
+        await OneSignal.login(cleanId);
+      } catch (e) {
+        _lastLoggedInEmpId = "";
+      }
     }
 
-    // 起動時：セットアップ状態の判定 ＆ IndexedDB同期
-    window.addEventListener("DOMContentLoaded", function() {
-      evaluateSetupGate();
-      restoreSavedAppBadge();
-
-      const savedEmpId = localStorage.getItem("tss_emp_id");
-      if (savedEmpId) {
-        syncEmpIdToIndexedDB(savedEmpId);
-        const params = new URLSearchParams(window.location.search);
-        const anpiId = params.get("anpiId") || "";
-        sendPushTrackBeforeLogin("OPENED", anpiId);
-      }
-    });
-
-    // アプリがバックグラウンドから前面に切り替わった瞬間にも判定・記録
-    document.addEventListener("visibilitychange", function() {
-      if (document.visibilityState === "visible") {
-        evaluateSetupGate();
-        restoreSavedAppBadge(); // ★追加
-        const params = new URLSearchParams(window.location.search);
-        sendPushTrackBeforeLogin("OPENED", params.get("anpiId") || "");
-      }
-    });
-
-    // =========================================================
-    // 3. OneSignal 初期化 ＆ イベント監視
-    // =========================================================
-    window.OneSignalDeferred = window.OneSignalDeferred || [];
-    OneSignalDeferred.push(async function(OneSignal) {
-      try {
-        oneSignalInstance = OneSignal;
-        await OneSignal.init({
-          // ★2箇所目：OneSignalのApp ID
-          appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
-          serviceWorkerPath: currentPath.replace(/^\//, '') + "OneSignalSDKWorker.js",
-          serviceWorkerParam: { scope: currentPath },
-          notifyButton: {
-            enable: false
-          }
-        });
-
-        evaluateSetupGate();
-        checkAndShowPromptBar(OneSignal);
-
-        const savedEmpId = localStorage.getItem("tss_emp_id");
-        if (savedEmpId) {
-          syncEmpIdToIndexedDB(savedEmpId);
-          await OneSignal.login(savedEmpId);
-        }
-
-        // 通知バナーがクリック（タップ）された瞬間
-        OneSignal.Notifications.addEventListener("click", function(event) {
-          retainBadgeUntilRead(); // ★追加：通知をタップしてバナーが消えてもアイコンに数字を残す
-          const data = (event && event.notification && event.notification.additionalData) || {};
-          sendPushTrackBeforeLogin("OPENED", data.anpiId || "");
-        });
-
-        // アプリを開いている状態で通知が着信した瞬間
-        OneSignal.Notifications.addEventListener("foregroundWillDisplay", function(event) {
-          const current = parseInt(localStorage.getItem("tss_unread_badge_count") || "0", 10);
-          updatePwaAppBadge(current + 1); // ★追加：着信時に未読カウントを+1
-          const data = (event && event.notification && event.notification.additionalData) || {};
-          sendPushTrackBeforeLogin("RECEIVED", data.anpiId || "");
-        });
-
-        OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
-          evaluateSetupGate();
-          checkAndShowPromptBar(OneSignal);
-          const empId = localStorage.getItem("tss_emp_id");
-          if (event.current.optedIn && empId) {
-            syncEmpIdToIndexedDB(empId);
-            await OneSignal.login(empId);
-          }
-        });
-      } catch (err) {
-        console.error("OneSignal初期化エラー:", err);
-        evaluateSetupGate();
-      }
-    });
-
-    // =========================================================
-    // アプリアイコンの数字バッジを IndexedDB と同期して更新・保持する関数
-    // =========================================================
     function saveBadgeCountToIndexedDB(num) {
       if (!window.indexedDB) return;
       try {
@@ -362,7 +252,6 @@
       } catch (e) {}
     }
 
-    // スマホの通知欄に残っている通知バナーをService Worker経由で確実に消去する関数
     function clearDisplayedPushNotifications(syncCount) {
       if (!("serviceWorker" in navigator)) return;
 
@@ -406,19 +295,16 @@
         }
       }
 
-      // 未読が0件になった時、またはアプリ内で既読にして未読数が減った時に残っている通知バナーを消去
       const isMsgZero = (typeof unreadMsgCount === "number" && unreadMsgCount === 0);
       if (num === 0 || isMsgZero || num < prev) {
         clearDisplayedPushNotifications(num);
       }
     }
 
-    // 通知タップ時・着信時に、未読を確認するまでバッジを残す関数
     function retainBadgeUntilRead() {
       restoreSavedAppBadge(true);
     }
 
-    // アプリ起動時・前面復帰時に、IndexedDBの最新カウント（着信加算分を含む）を読み取って再点灯
     function restoreSavedAppBadge(ensureAtLeastOne) {
       if (!window.indexedDB) {
         const fallback = parseInt(localStorage.getItem("tss_unread_badge_count") || "0", 10);
@@ -453,8 +339,112 @@
       } catch (e) {}
     }
 
+    // =========================================================
+    // 2. ログイン前に「通知タップ（OPENED）」「端末着信（RECEIVED）」をGASへ送信する関数
+    // =========================================================
+    function sendPushTrackBeforeLogin(eventType, anpiId) {
+      try {
+        const empId = localStorage.getItem("tss_emp_id");
+        if (!empId) return;
+
+        const nowMin = Math.floor(Date.now() / 60000);
+        const dedupKey = `TSS_TRACK_${eventType}_${anpiId || 'ACTIVE'}_${nowMin}`;
+        if (sessionStorage.getItem(dedupKey)) return;
+        sessionStorage.setItem(dedupKey, "1");
+
+        const payload = JSON.stringify({
+          action: "ANPI_PUSH_TRACK",
+          userId: String(empId).trim(),
+          eventType: eventType,
+          anpiId: anpiId || ""
+        });
+
+        fetch(GAS_WEBHOOK_URL, {
+          method: "POST",
+          mode: "no-cors",
+          keepalive: true,
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: payload
+        }).catch(function() {});
+      } catch (e) {}
+    }
+
+    window.addEventListener("DOMContentLoaded", function() {
+      evaluateSetupGate();
+      restoreSavedAppBadge();
+
+      const savedEmpId = localStorage.getItem("tss_emp_id");
+      if (savedEmpId) {
+        syncEmpIdToIndexedDB(savedEmpId);
+        const params = new URLSearchParams(window.location.search);
+        const anpiId = params.get("anpiId") || "";
+        sendPushTrackBeforeLogin("OPENED", anpiId);
+      }
+    });
+
+    document.addEventListener("visibilitychange", function() {
+      if (document.visibilityState === "visible") {
+        evaluateSetupGate();
+        restoreSavedAppBadge();
+        const params = new URLSearchParams(window.location.search);
+        sendPushTrackBeforeLogin("OPENED", params.get("anpiId") || "");
+      }
+    });
+
+    // =========================================================
+    // 3. OneSignal 初期化 ＆ イベント監視
+    // =========================================================
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    OneSignalDeferred.push(async function(OneSignal) {
+      try {
+        oneSignalInstance = OneSignal;
+        await OneSignal.init({
+          // ★2箇所目：OneSignalのApp ID
+          appId: "961fa089-fa82-41eb-bc31-348eaabd4bad",
+          serviceWorkerPath: currentPath.replace(/^\//, '') + "OneSignalSDKWorker.js",
+          serviceWorkerParam: { scope: currentPath },
+          notifyButton: {
+            enable: false
+          }
+        });
+
+        evaluateSetupGate();
+        checkAndShowPromptBar(OneSignal);
+
+        // ★対策2-②：初期化時の重複防止ログイン
+        const savedEmpId = localStorage.getItem("tss_emp_id");
+        if (savedEmpId) {
+          await loginOneSignalOnce(OneSignal, savedEmpId);
+        }
+
+        OneSignal.Notifications.addEventListener("click", function(event) {
+          retainBadgeUntilRead();
+          const data = (event && event.notification && event.notification.additionalData) || {};
+          sendPushTrackBeforeLogin("OPENED", data.anpiId || "");
+        });
+
+        OneSignal.Notifications.addEventListener("foregroundWillDisplay", function(event) {
+          const current = parseInt(localStorage.getItem("tss_unread_badge_count") || "0", 10);
+          updatePwaAppBadge(current + 1);
+          const data = (event && event.notification && event.notification.additionalData) || {};
+          sendPushTrackBeforeLogin("RECEIVED", data.anpiId || "");
+        });
+
+        OneSignal.User.PushSubscription.addEventListener("change", async function(event) {
+          evaluateSetupGate();
+          checkAndShowPromptBar(OneSignal);
+          const empId = localStorage.getItem("tss_emp_id");
+          if (event.current.optedIn && empId) {
+            await loginOneSignalOnce(OneSignal, empId);
+          }
+        });
+      } catch (err) {
+        console.error("OneSignal初期化エラー:", err);
+        evaluateSetupGate();
+      }
+    });
+
     function checkAndShowPromptBar(OneSignal) {
-      // セットアップゲート表示中は上部のデバッグバーを重複表示しない
       const gateOverlay = document.getElementById("pwa-setup-gate");
       if (gateOverlay && gateOverlay.style.display !== "none") {
         const bar = document.getElementById("os-debug-bar");
@@ -494,11 +484,12 @@
         textSpan.onclick = function() {
           OneSignalDeferred.push(async function(OneSignal) {
             await OneSignal.Notifications.requestPermission();
-            await OneSignal.User.PushSubscription.optIn();
+            if (!OneSignal.User.PushSubscription.optedIn) {
+              await OneSignal.User.PushSubscription.optIn();
+            }
             const empId = localStorage.getItem("tss_emp_id");
             if (empId) {
-              syncEmpIdToIndexedDB(empId);
-              await OneSignal.login(empId);
+              await loginOneSignalOnce(OneSignal, empId);
             }
             evaluateSetupGate();
             checkAndShowPromptBar(OneSignal);
@@ -533,20 +524,20 @@
       }
     }
 
-    // GASからの合図（ログイン・ログアウト）を受け取る処理
+    // GASからの合図（バッジ更新・ログイン・ログアウト）を受け取る処理
     window.addEventListener("message", function(event) {
       if (!event.data) return;
-      // ★追加：home.html から未読件数を受け取ってアイコンバッジを更新（0件なら消去）
+
       if (event.data.type === "TSS_BADGE_UPDATE") {
         updatePwaAppBadge(event.data.count, event.data.unreadMsgCount);
       }
 
+      // ★対策2-④：ログイン完了時の重複防止ログイン
       if (event.data.type === "TSS_LOGIN" && event.data.userId) {
         const empId = String(event.data.userId).trim();
         localStorage.setItem("tss_emp_id", empId);
-        syncEmpIdToIndexedDB(empId);
         OneSignalDeferred.push(async function(OneSignal) {
-          await OneSignal.login(empId);
+          await loginOneSignalOnce(OneSignal, empId);
         });
       }
 
@@ -571,7 +562,6 @@
       border: none;
       display: block;
     }
-    /* 初回セットアップ強制ゲート（PWA化＋通知許可が完了するまで表示） */
     #pwa-setup-gate {
       position: fixed;
       inset: 0;
@@ -687,7 +677,6 @@
         <div style="font-size: 13px; color: #6b7280; font-weight: bold; margin-bottom: 12px;">TSS社内ポータル</div>
       </div>
 
-      <!-- 0. LINE等のアプリ内ブラウザで開いた場合の警告 -->
       <div id="gate-inapp-warning" style="display: none;">
         <h2 class="gate-title">標準ブラウザで開き直してください</h2>
         <div class="gate-alert">
@@ -701,7 +690,6 @@
         </button>
       </div>
 
-      <!-- STEP 1：ホーム画面に追加（未アプリ化・ブラウザ表示中） -->
       <div id="gate-step1-pwa" style="display: none;">
         <h2 class="gate-title">① ホーム画面に追加してください</h2>
         <div class="gate-alert">
@@ -709,7 +697,6 @@
           以下の手順でホーム画面に追加し、<b>追加されたアイコンから開くとログイン画面に進めます。</b>
         </div>
 
-        <!-- iPhone (Safari) 用案内 -->
         <div id="guide-ios-box" class="gate-step-list" style="display: none;">
           <div style="font-weight: bold; color: #2563eb; margin-bottom: 8px;">📱 iPhone（Safari）の手順</div>
           <div class="gate-step-item">
@@ -726,7 +713,6 @@
           </div>
         </div>
 
-        <!-- Android (Chrome) 用案内 -->
         <div id="guide-android-box" class="gate-step-list" style="display: none;">
           <div style="font-weight: bold; color: #2563eb; margin-bottom: 8px;">📱 Android（Chrome）の手順</div>
           <button type="button" id="android-direct-install-btn" class="gate-btn gate-btn-primary" style="display: none; margin-bottom: 12px;" onclick="triggerAndroidInstall()">
@@ -747,11 +733,9 @@
         </div>
       </div>
 
-      <!-- STEP 2：通知の許可（ホーム画面アイコンから起動後） -->
       <div id="gate-step2-push" style="display: none;">
         <h2 class="gate-title">② 通知を「許可」してください</h2>
 
-        <!-- 通常（未許可）状態 -->
         <div id="push-default-box">
           <div class="gate-alert" style="background: #eff6ff; border-color: #bfdbfe; color: #1e40af;">
             📢 緊急時の安否確認や重要なお知らせを受け取るため、通知をオンにすると<b>ID・パスワード入力画面</b>が表示されます。
@@ -764,7 +748,6 @@
           </button>
         </div>
 
-        <!-- 誤って「ブロック（許可しない）」を押してしまった場合 -->
         <div id="push-denied-box" style="display: none;">
           <div class="gate-alert">
             ❌ 通知が「許可しない（ブロック）」に設定されているため、ログイン画面へ進めません。
@@ -783,6 +766,5 @@
 
   <!-- ★3箇所目：GASの社内ポータルURL -->
   <iframe id="gas-portal-frame" src="https://script.google.com/a/macros/toyosogo-portal.com/s/AKfycbywoTJGglKIMRd0UCYhECGQRnopD5lLb_oSfE1OhbKnwJNA4f4vbP7_LHhxFi9ANUd7-A/exec" allow="geolocation; clipboard-write"></iframe>
-</body>
 </body>
 </html>
