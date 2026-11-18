@@ -264,6 +264,7 @@
     // 起動時：セットアップ状態の判定 ＆ IndexedDB同期
     window.addEventListener("DOMContentLoaded", function() {
       evaluateSetupGate();
+      restoreSavedAppBadge();
 
       const savedEmpId = localStorage.getItem("tss_emp_id");
       if (savedEmpId) {
@@ -278,6 +279,7 @@
     document.addEventListener("visibilitychange", function() {
       if (document.visibilityState === "visible") {
         evaluateSetupGate();
+        restoreSavedAppBadge(); // ★追加
         const params = new URLSearchParams(window.location.search);
         sendPushTrackBeforeLogin("OPENED", params.get("anpiId") || "");
       }
@@ -311,12 +313,15 @@
 
         // 通知バナーがクリック（タップ）された瞬間
         OneSignal.Notifications.addEventListener("click", function(event) {
+          retainBadgeUntilRead(); // ★追加：通知をタップしてバナーが消えてもアイコンに数字を残す
           const data = (event && event.notification && event.notification.additionalData) || {};
           sendPushTrackBeforeLogin("OPENED", data.anpiId || "");
         });
 
         // アプリを開いている状態で通知が着信した瞬間
         OneSignal.Notifications.addEventListener("foregroundWillDisplay", function(event) {
+          const current = parseInt(localStorage.getItem("tss_unread_badge_count") || "0", 10);
+          updatePwaAppBadge(current + 1); // ★追加：着信時に未読カウントを+1
           const data = (event && event.notification && event.notification.additionalData) || {};
           sendPushTrackBeforeLogin("RECEIVED", data.anpiId || "");
         });
@@ -449,6 +454,10 @@
     // GASからの合図（ログイン・ログアウト）を受け取る処理
     window.addEventListener("message", function(event) {
       if (!event.data) return;
+      // ★追加：home.html から未読件数を受け取ってアイコンバッジを更新（0件なら消去）
+      if (event.data.type === "TSS_BADGE_UPDATE") {
+        updatePwaAppBadge(event.data.count);
+      }
 
       if (event.data.type === "TSS_LOGIN" && event.data.userId) {
         const empId = String(event.data.userId).trim();
