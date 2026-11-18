@@ -342,11 +342,30 @@
     });
 
     // =========================================================
-    // アプリアイコンの数字バッジ（未読件数）を更新・保持する関数
+    // アプリアイコンの数字バッジを IndexedDB と同期して更新・保持する関数
     // =========================================================
+    function saveBadgeCountToIndexedDB(num) {
+      if (!window.indexedDB) return;
+      try {
+        const req = indexedDB.open("tss_portal_push_db", 1);
+        req.onupgradeneeded = function(e) {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains("kv")) {
+            db.createObjectStore("kv");
+          }
+        };
+        req.onsuccess = function(e) {
+          const db = e.target.result;
+          const tx = db.transaction("kv", "readwrite");
+          tx.objectStore("kv").put(num, "tss_badge_count");
+        };
+      } catch (e) {}
+    }
+
     function updatePwaAppBadge(count) {
       const num = Math.max(0, parseInt(count, 10) || 0);
       localStorage.setItem("tss_unread_badge_count", String(num));
+      saveBadgeCountToIndexedDB(num); // ★裏側のService Worker用にIndexedDBへも保存
 
       if ("setAppBadge" in navigator && "clearAppBadge" in navigator) {
         if (num > 0) {
@@ -357,18 +376,44 @@
       }
     }
 
-    // 通知タップ時・着信時に、未読を確認するまでバッジ（最低1以上）を残す関数
+    // 通知タップ時・着信時に、未読を確認するまでバッジを残す関数
     function retainBadgeUntilRead() {
-      const saved = parseInt(localStorage.getItem("tss_unread_badge_count") || "0", 10);
-      updatePwaAppBadge(saved > 0 ? saved : 1);
+      restoreSavedAppBadge(true);
     }
 
-    // アプリ起動時・前面復帰時に、OS側で消されたバッジを再点灯させる関数
-    function restoreSavedAppBadge() {
-      const saved = parseInt(localStorage.getItem("tss_unread_badge_count") || "0", 10);
-      if (saved > 0 && "setAppBadge" in navigator) {
-        navigator.setAppBadge(saved).catch(function() {});
+    // アプリ起動時・前面復帰時に、IndexedDBの最新カウント（着信加算分を含む）を読み取って再点灯
+    function restoreSavedAppBadge(ensureAtLeastOne) {
+      if (!window.indexedDB) {
+        const fallback = parseInt(localStorage.getItem("tss_unread_badge_count") || "0", 10);
+        const target = ensureAtLeastOne ? Math.max(1, fallback) : fallback;
+        if (target > 0 && "setAppBadge" in navigator) navigator.setAppBadge(target).catch(function() {});
+        return;
       }
+
+      try {
+        const req = indexedDB.open("tss_portal_push_db", 1);
+        req.onupgradeneeded = function(e) {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
+        };
+        req.onsuccess = function(e) {
+          const db = e.target.result;
+          const tx = db.transaction("kv", "readonly");
+          const getReq = tx.objectStore("kv").get("tss_badge_count");
+          getReq.onsuccess = function() {
+            const idbVal = parseInt(getReq.result, 10);
+            const lsVal = parseInt(localStorage.getItem("tss_unread_badge_count") || "0", 10);
+            let num = !isNaN(idbVal) ? idbVal : lsVal;
+            if (ensureAtLeastOne && num < 1) num = 1;
+
+            localStorage.setItem("tss_unread_badge_count", String(num));
+            if ("setAppBadge" in navigator && "clearAppBadge" in navigator) {
+              if (num > 0) navigator.setAppBadge(num).catch(function() {});
+              else navigator.clearAppBadge().catch(function() {});
+            }
+          };
+        };
+      } catch (e) {}
     }
 
     function checkAndShowPromptBar(OneSignal) {
