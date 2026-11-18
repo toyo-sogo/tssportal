@@ -88,5 +88,14 @@ self.addEventListener("notificationclick", function(event) {
   event.waitUntil(reportPushEventToGas("OPENED", anpiId));
 });
 
+self.addEventListener("push", function(event) {
+  if (self.navigator && typeof self.navigator.setAppBadge === "function") {
+    event.waitUntil(
+      self.navigator.setAppBadge(1).catch(function() {})
+    );
+  }
+});
+
 // OneSignal公式Service Worker本体の読み込み
 importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");
+
